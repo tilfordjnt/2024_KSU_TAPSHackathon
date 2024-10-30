@@ -1,45 +1,101 @@
-# 2024_KSU_TAPSHackathon
-2024 Kansas State University TAPS Hackathon competition for Water Wise Wildcats
 import streamlit as st
 import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
 import requests
 import math
 import datetime
+from datetime import timedelta
 
-# Clear cache button
-if st.sidebar.button('Clear Cache'):
-    st.cache_data.clear()
+# Set the page layout and theme
+st.set_page_config(page_title="Irrigation Advisory Tool", layout="centered")
+
+# Define custom CSS for styling
+st.markdown("""
+    <style>
+        h1, h2, h3, h4, h5, h6 {
+            color: #2E8B57;
+            font-family: 'Arial', sans-serif;
+        }
+        .stButton>button {
+            background-color: #2E8B57;
+            color: white;
+        }
+        .css-1aumxhk {
+            text-align: center;
+            color: #2E8B57;
+            font-weight: bold;
+            font-size: 18px;
+        }
+        .css-10trblm {
+            color: #2E8B57;
+            font-family: 'Arial', sans-serif;
+        }
+    </style>
+""", unsafe_allow_html=True)
 
 # Title of the dashboard
-st.title("Irrigation Advisory Tool")
+st.title("🌾 Irrigation Advisory Tool")
+st.subheader("Helping You Make Data-Driven Irrigation Decisions")
 
-# Display current date
-current_date_display = datetime.datetime.now().strftime("%B %d, %Y")
-st.write(f"Current Date: {current_date_display}")
+# Load the NDVI and irrigation data from the specified Excel files
+ndvi_data = pd.read_excel('/Users/jeremydavies/Downloads/Book 2 (2).xlsx', skiprows=2)
+irrigation_data = pd.read_excel('/Users/jeremydavies/Downloads/Book 1 (1).xlsx', header=1)
 
-# Sidebar for user input
-st.sidebar.header("Enter Your Location")
+# Clean up NDVI data by renaming columns to numerical IDs for merging consistency
+ndvi_data = ndvi_data.rename(columns={"DATE": "Date"})
+ndvi_data.columns = ["Date", 2, 4, 5, 13, 15, 16, 18, 21, 22]
+ndvi_data_long = ndvi_data.melt(id_vars="Date", var_name="ID", value_name="NDVI")
+ndvi_data_long.dropna(inplace=True)
+
+# Remove "Total" column and convert date columns in irrigation data
+irrigation_data = irrigation_data.loc[:, irrigation_data.columns != "Total"]
+irrigation_data.columns = ["ID"] + [pd.to_datetime(col).date() for col in irrigation_data.columns[1:]]
+irrigation_data_long = irrigation_data.melt(id_vars="ID", var_name="Date", value_name="Irrigation")
+irrigation_data_long['Date'] = pd.to_datetime(irrigation_data_long['Date'], errors='coerce')
+irrigation_data_long['Irrigation'].fillna(0, inplace=True)
+
+# Merge cleaned data for plotting
+merged_data = pd.merge(ndvi_data_long, irrigation_data_long, on=['Date', 'ID'], how='inner')
+
+# Aggregate total irrigation and average NDVI by plot ID
+aggregated_data = merged_data.groupby("ID").agg({"Irrigation": "sum", "NDVI": "mean"}).reset_index()
+
+# Plot Aggregated Scatter Plot with Trend Line using matplotlib
+st.subheader("Total Irrigation vs. Average NDVI per Plot")
+fig, ax = plt.subplots(figsize=(10, 6))
+ax.scatter(aggregated_data["Irrigation"], aggregated_data["NDVI"], s=100, alpha=0.7, color="#2E8B57", label="Data Points")
+# Fit and plot a trend line
+m, b = np.polyfit(aggregated_data["Irrigation"], aggregated_data["NDVI"], 1)
+ax.plot(aggregated_data["Irrigation"], m * aggregated_data["Irrigation"] + b, color="red", label="Trend Line")
+ax.set_title("Relationship between Total Irrigation and Average NDVI", fontsize=16)
+ax.set_xlabel("Total Irrigation (inches)", fontsize=14)
+ax.set_ylabel("Average NDVI", fontsize=14)
+ax.legend()
+ax.grid(True, linestyle='--', alpha=0.5)
+
+# Display the plot
+st.pyplot(fig)
+
+# Sidebar: location and crop information
+st.sidebar.header("🗺️ Location and Crop Details")
 town = st.sidebar.text_input("Enter the town in Kansas", "Manhattan")
 
-# Sidebar for planting date
-st.sidebar.header("Crop Information")
-planting_date = st.sidebar.date_input("Enter Planting Date", datetime.date.today())
+# Sidebar: planting date and crop type selection
+planting_date = st.sidebar.date_input("🌱 Enter Planting Date", datetime.date.today())
+crop_type = st.sidebar.selectbox("🌾 Select Crop Type", ["Corn", "Wheat", "Soybean"])
 
-# Sidebar for crop type and irrigation setup
-crop_type = st.sidebar.selectbox("Select Crop Type", ["Corn", "Wheat", "Soybean"])
-
-# Typical growth cycle periods for crops (in days)
+# Crop growth periods
 growth_periods = {
     "Corn": {"Initial": 30, "Mid-Season": 60, "Late-Season": 30},
     "Wheat": {"Initial": 25, "Mid-Season": 70, "Late-Season": 35},
     "Soybean": {"Initial": 20, "Mid-Season": 50, "Late-Season": 30}
 }
 
-# Function to calculate current crop stage based on planting date
+# Calculate crop stage
 def get_crop_stage(planting_date, crop_type, current_date):
     days_since_planting = (current_date - planting_date).days
     growth_stages = growth_periods[crop_type]
-
     if days_since_planting <= growth_stages["Initial"]:
         return "Initial"
     elif days_since_planting <= (growth_stages["Initial"] + growth_stages["Mid-Season"]):
@@ -47,31 +103,36 @@ def get_crop_stage(planting_date, crop_type, current_date):
     else:
         return "Late-Season"
 
-# Calculate crop stage based on current date
+# Display crop stage
 current_date = datetime.date.today()
 crop_stage = get_crop_stage(planting_date, crop_type, current_date)
-st.sidebar.write(f"Current Crop Stage: {crop_stage}")
+st.sidebar.markdown(f"**🌱 Current Crop Stage**: {crop_stage}")
 
-# Sidebar for irrigation entry
-st.sidebar.header("Irrigation Data")
-st.sidebar.write(f"Enter irrigation events for the past few days:")
+# Sidebar: irrigation entry
+st.sidebar.header("💧 Irrigation Data")
+st.sidebar.write("Enter irrigation events starting 21 days before planting:")
 
-# Dictionary to hold irrigation amounts
-irrigation_events = {}
+# Define irrigation date range starting 21 days before planting
+start_irrigation_date = planting_date - timedelta(days=21)
+end_irrigation_date = current_date
+irrigation_dates_range = pd.date_range(start=start_irrigation_date, end=end_irrigation_date)
 
-# Multi-date picker: Allow users to select irrigation days
+# Multi-date picker for irrigation days within range
 selected_irrigation_dates = st.sidebar.multiselect(
-    "Select Irrigation Days", pd.date_range(start=current_date - pd.Timedelta(days=7), end=current_date).to_list(), default=[]
+    "Select Irrigation Days", irrigation_dates_range.to_list(), default=[]
 )
 
+# Dictionary for irrigation amounts
+irrigation_events = {}
+
 # Display water amount input box for each selected day
-st.write("Enter irrigation amount for each selected day (in inches):")
+st.write("💧 **Enter Irrigation Amount for Each Selected Day (in inches):**")
 for date in selected_irrigation_dates:
     amount_in = st.number_input(f"Irrigation amount on {date.strftime('%Y-%m-%d')}", min_value=0.0, step=0.1, key=f"irrigation_{date}")
     if amount_in > 0:
         irrigation_events[date] = amount_in  # Store the amount in inches
 
-# Function to get real-time weather data using OpenWeather API
+# Function to get weather data from OpenWeather API
 def get_weather_data_with_solar(town):
     api_key = "e6139314284b647780f9e4e3f8e18ca2"
     base_url = f"http://api.openweathermap.org/data/2.5/forecast?q={town},US&appid={api_key}&units=imperial"
@@ -96,19 +157,49 @@ def get_weather_data_with_solar(town):
     else:
         return None
 
-# FAO Penman-Monteith model for ET₀ calculation
-def calculate_et0(temp, wind_speed, humidity):
-    T = temp  
-    u2 = wind_speed  
-    e_a = humidity / 100
+# Function to retrieve solar radiation from NASA POWER API
+def get_nasa_solar_radiation(latitude, longitude):
+    today = datetime.date.today()
+    base_url = f"https://power.larc.nasa.gov/api/temporal/daily/point?parameters=ALLSKY_SFC_SW_DWN&community=AG&longitude={longitude}&latitude={latitude}&start={today.strftime('%Y%m%d')}&end={today.strftime('%Y%m%d')}&format=JSON"
+    
+    response = requests.get(base_url)
+    if response.status_code == 200:
+        data = response.json()
+        solar_radiation = data['properties']['parameter']['ALLSKY_SFC_SW_DWN'][today.strftime('%Y%m%d')]
+        return solar_radiation
+    else:
+        return None
 
-    # Penman-Monteith parameters in imperial units
-    e_s = 0.6108 * math.exp((17.27 * (T - 32) * 5/9) / ((T - 32) * 5/9 + 237.3))  
-    e_s_minus_e_a = e_s - e_a
-    gamma = 0.665 * 0.001 * 101.3
-    delta = 4098 * (0.6108 * math.exp((17.27 * (T - 32) * 5/9) / ((T - 32) * 5/9 + 237.3))) / (((T - 32) * 5/9 + 237.3) ** 2)
+# FAO Penman-Monteith model for ET₀ calculation with all parameters
+def calculate_et0(temp, wind_speed, humidity, solar_radiation, latitude):
+    T = (temp - 32) * 5/9  # Convert temperature to Celsius
+    u2 = wind_speed * 0.44704  # Convert wind speed from mph to m/s
+    e_s = 0.6108 * math.exp((17.27 * T) / (T + 237.3))  # Saturation vapor pressure in kPa
+    e_a = e_s * (humidity / 100)  # Actual vapor pressure
+    vpd = e_s - e_a  # Vapor pressure deficit
+    
+    # Constants
+    gamma = 0.665 * 0.001 * 101.3  # Psychrometric constant in kPa/°C
+    
+    # Extraterrestrial radiation (Ra)
+    J = datetime.datetime.now().timetuple().tm_yday  # Day of the year
+    lat_rad = math.radians(latitude)
+    dr = 1 + 0.033 * math.cos(2 * math.pi / 365 * J)
+    delta = 0.409 * math.sin(2 * math.pi / 365 * J - 1.39)
+    omega = math.acos(-math.tan(lat_rad) * math.tan(delta))
+    Ra = (24 * 60 / math.pi) * 0.0820 * dr * (omega * math.sin(lat_rad) * math.sin(delta) + math.cos(lat_rad) * math.cos(delta) * math.sin(omega))
 
-    ET0 = (0.408 * delta * (10) + gamma * (900 / ((T - 32) * 5/9 + 273)) * u2 * e_s_minus_e_a) / (delta + gamma * (1 + 0.34 * u2))
+    # Net radiation (Rn)
+    Rns = (1 - 0.23) * solar_radiation  # Net shortwave radiation
+    Rnl = (4.903e-9 * ((T + 273.16)**4) * (0.34 - 0.14 * math.sqrt(e_a)) * ((1.35 * (solar_radiation / Ra)) - 0.35))  # Net longwave radiation
+    Rn = Rns - Rnl  # Net radiation in MJ/m^2/day
+
+    # Slope of the vapor pressure curve
+    delta_slope = (4098 * e_s) / ((T + 237.3) ** 2)
+
+    # FAO Penman-Monteith equation for ET₀
+    ET0 = ((0.408 * delta_slope * (Rn - 0)) + (gamma * (900 / (T + 273)) * u2 * vpd)) / (delta_slope + gamma * (1 + 0.34 * u2))
+    
     return ET0 * 0.0393701  # Convert from mm/day to inches/day
 
 # Crop coefficient (Kc) adjustment based on growth stage
@@ -120,44 +211,7 @@ kc_values = {
 
 kc = kc_values[crop_type][crop_stage]
 
-# Function to calculate ETc using ET₀ and Kc
-def calculate_etc(et0, kc):
-    return et0 * kc
-
-# Decay model for past irrigation events (decay reduces irrigation impact over time)
-def apply_decay_to_irrigation_events(irrigation_events, current_date):
-    decayed_irrigation = 0
-    decay_rate = 0.9  # Decay factor to reduce water effect over time
-
-    for event_date, irrigation_amount in irrigation_events.items():
-        days_since_irrigation = (current_date - event_date.date()).days
-        if days_since_irrigation >= 0:
-            decayed_irrigation += irrigation_amount * (decay_rate ** days_since_irrigation)
-    
-    return decayed_irrigation
-
-# Water balance function for current data, using FAO equation and irrigation decay model
-def update_soil_moisture_with_current_data(weather_data, irrigation_events, current_date):
-    soil_moisture = 50  # Starting soil moisture (assumed 50%)
-    
-    # Get today's ET₀ from weather data
-    et0 = calculate_et0(weather_data["temperature"], weather_data["wind_speed"], weather_data["humidity"])
-    etc = calculate_etc(et0, kc)
-    
-    # Subtract ETc (water loss) and add any forecast precipitation
-    soil_moisture -= etc
-    soil_moisture += weather_data["precipitation_inches"]
-    
-    # Apply decayed irrigation amounts from recent irrigation events
-    decayed_irrigation = apply_decay_to_irrigation_events(irrigation_events, current_date)
-    soil_moisture += decayed_irrigation
-    
-    # Keep soil moisture within realistic bounds (0% to 100%)
-    soil_moisture = min(max(soil_moisture, 0), 100)
-    
-    return soil_moisture
-
-# Irrigation advice based on updated soil moisture
+# Irrigation advice function
 def irrigation_schedule(soil_moisture):
     if soil_moisture < 40:
         irrigation_needed_inches = 1.0  
@@ -168,21 +222,41 @@ def irrigation_schedule(soil_moisture):
     else:
         return "Good: Soil moisture is sufficient, and no irrigation is needed."
 
-# Main function to handle workflow
-if st.sidebar.button("Get Weather Data and Irrigation Advice"):
-    weather_data = get_weather_data_with_solar(town)
-    if weather_data:
-        st.write(f"Weather in {town}:")
-        st.write(f"Temperature: {weather_data['temperature']} °F")
-        st.write(f"Humidity: {weather_data['humidity']} %")
-        st.write(f"Wind Speed: {weather_data['wind_speed']} mph")
-        st.write(f"Precipitation forecast: {weather_data['precipitation_inches']:.2f} inches")
+# Display dashboard results in reserved bottom section
+with st.container():
+    st.subheader("📊 Dashboard Results")
+    
+    if st.sidebar.button("Get Weather Data and Irrigation Advice"):
+        weather_data = get_weather_data_with_solar(town)
+        if weather_data:
+            st.write(f"Weather in {town}:")
+            st.write(f"Temperature: {weather_data['temperature']} °F")
+            st.write(f"Humidity: {weather_data['humidity']} %")
+            st.write(f"Wind Speed: {weather_data['wind_speed']} mph")
+            st.write(f"Precipitation forecast: {weather_data['precipitation_inches']:.2f} inches")
 
-        # Use current weather data and recent irrigation events with decay model to update soil moisture
-        soil_moisture = update_soil_moisture_with_current_data(weather_data, irrigation_events, current_date)
-        
-        st.write(f"Estimated Soil Moisture: {soil_moisture:.2f}%")
+            # Fetch and display solar radiation, calculate ET₀ and provide irrigation advice
+            solar_radiation = get_nasa_solar_radiation(weather_data["latitude"], weather_data["longitude"])
+            if solar_radiation:
+                et0 = calculate_et0(
+                    weather_data["temperature"],
+                    weather_data["wind_speed"],
+                    weather_data["humidity"],
+                    solar_radiation,
+                    weather_data["latitude"]
+                )
+                etc = et0 * kc
+                st.write(f"Calculated ETc: {etc:.2f} inches/day")
 
-        # Generate irrigation advice based on updated soil moisture
-        irrigation_advice = irrigation_schedule(soil_moisture)
-        st.write(f"Irrigation Advice: {irrigation_advice}")
+                # Example soil moisture calculation for advice
+                initial_soil_moisture = 50
+                soil_moisture = initial_soil_moisture - etc + weather_data["precipitation_inches"]
+                soil_moisture = min(max(soil_moisture, 0), 100)
+
+                irrigation_advice = irrigation_schedule(soil_moisture)
+                st.write(f"Irrigation Advice: {irrigation_advice}")
+            else:
+                st.write("Could not retrieve solar radiation data.")
+        else:
+            st.write("Could not retrieve weather data.")
+    
