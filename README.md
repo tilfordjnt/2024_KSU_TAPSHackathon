@@ -1,3 +1,4 @@
+# Import required libraries
 import streamlit as st
 import pandas as pd
 import requests
@@ -5,13 +6,13 @@ import math
 import datetime
 from datetime import timedelta
 
-# Set the page layout and theme
+# Set up the page configuration
 st.set_page_config(page_title="Irrigation Advisory Tool", layout="centered")
 
 # Define custom CSS for styling
 st.markdown("""
     <style>
-        h1, h2, h3, h4, h5, h6 {
+        h1 {
             color: #2E8B57;
             font-family: 'Arial', sans-serif;
         }
@@ -37,12 +38,12 @@ st.title("🌾 Irrigation Advisory Tool")
 st.subheader("Helping You Make Data-Driven Irrigation Decisions")
 
 # Sidebar: location and crop information
-st.sidebar.header("🗺️ Location and Crop Details")
-town = st.sidebar.text_input("Enter the town in Kansas", "Manhattan")
+st.sidebar.header("Location and Crop Details")
+town = st.sidebar.text_input("Town", "Manhattan")
 
 # Sidebar: planting date and crop type selection
-planting_date = st.sidebar.date_input("🌱 Enter Planting Date", datetime.date.today())
-crop_type = st.sidebar.selectbox("🌾 Select Crop Type", ["Corn", "Wheat", "Soybean"])
+planting_date = st.sidebar.date_input("Planting Date", datetime.date.today())
+crop_type = st.sidebar.selectbox("Crop Type", ["Corn", "Wheat", "Soybean"])
 
 # Crop growth periods
 growth_periods = {
@@ -65,20 +66,22 @@ def get_crop_stage(planting_date, crop_type, current_date):
 # Display crop stage
 current_date = datetime.date.today()
 crop_stage = get_crop_stage(planting_date, crop_type, current_date)
-st.sidebar.markdown(f"**🌱 Current Crop Stage**: {crop_stage}")
+st.sidebar.markdown(f"**Current Crop Stage**: {crop_stage}")
 
-# Sidebar for irrigation input
-st.sidebar.header("💧 Irrigation Data")
-st.sidebar.write("Enter irrigation events starting 21 days before planting:")
+# Sidebar for initial soil moisture
+st.sidebar.header("Initial Soil Moisture and Irrigation Data")
+st.sidebar.write("Choose the initial soil moisture date and amount:")
 
 # Define irrigation date range starting 21 days before planting
 start_irrigation_date = planting_date - timedelta(days=21)
+initial_soil_moisture_date = st.sidebar.date_input("Initial Soil Moisture Date", start_irrigation_date)
+initial_soil_moisture = st.sidebar.number_input("Initial Soil Moisture (%)", min_value=0.0, step=0.1)
+
+# Sidebar: irrigation events
 end_irrigation_date = current_date
 irrigation_dates_range = pd.date_range(start=start_irrigation_date, end=end_irrigation_date)
-
-# Multi-date picker for irrigation days within range
 selected_irrigation_dates = st.sidebar.multiselect(
-    "Select Irrigation Days", irrigation_dates_range.to_list(), default=[]
+    "Irrigation Days", irrigation_dates_range.to_list(), default=[]
 )
 
 # Dictionary for irrigation amounts
@@ -88,168 +91,112 @@ for date in selected_irrigation_dates:
     if amount_in > 0:
         irrigation_events[date] = amount_in  # Store the amount in inches
 
-# Only display results if irrigation data is entered
-if irrigation_events:
+# OpenWeather Historical Weather Data function
+def get_openweather_historical_data(latitude, longitude, start_date, end_date):
+    api_key = "YOUR_OPENWEATHER_API_KEY"  # Replace with your actual API key
+    base_url = "https://api.openweathermap.org/data/2.5/onecall/timemachine"
+    historical_data = []
     
-    # Define helper functions
-    def get_weather_data_with_solar(town):
-        api_key = "your_openweather_api_key"
-        base_url = f"http://api.openweathermap.org/data/2.5/forecast?q={town},US&appid={api_key}&units=imperial"
+    dates = pd.date_range(start=start_date, end=end_date)
+    for date in dates:
+        timestamp = int(date.timestamp())
+        url = f"{base_url}?lat={latitude}&lon={longitude}&dt={timestamp}&appid={api_key}&units=imperial"
+        response = requests.get(url)
         
-        response = requests.get(base_url)
         if response.status_code == 200:
             data = response.json()
-            rainfall_inches = sum([data['list'][i]['rain'].get('3h', 0) if 'rain' in data['list'][i] else 0 for i in range(0, 8)])
-            
-            latitude = data['city']['coord']['lat']
-            longitude = data['city']['coord']['lon']
-            
-            weather = {
-                "temperature": data['list'][0]['main']['temp'],
-                "humidity": data['list'][0]['main']['humidity'],
-                "wind_speed": data['list'][0]['wind']['speed'],
-                "precipitation_inches": rainfall_inches * 0.0393701,  # Convert mm to inches
-                "latitude": latitude,
-                "longitude": longitude
+            daily_data = {
+                "date": date,
+                "temperature": data['current']['temp'],
+                "humidity": data['current']['humidity'],
+                "wind_speed": data['current']['wind_speed'],
+                "precipitation": data['current'].get('rain', {}).get('1h', 0) * 0.0393701,  # Convert mm to inches
+                "solar_radiation": 10  # Assuming average solar radiation; OpenWeather lacks solar radiation data directly
             }
-            return weather
+            historical_data.append(daily_data)
         else:
-            return None
+            st.write(f"⚠️ Could not retrieve data for {date}.")
+    
+    return historical_data
 
-    def get_nasa_solar_radiation(latitude, longitude):
-        today = datetime.date.today()
-        base_url = f"https://power.larc.nasa.gov/api/temporal/daily/point?parameters=ALLSKY_SFC_SW_DWN&community=AG&longitude={longitude}&latitude={latitude}&start={today.strftime('%Y%m%d')}&end={today.strftime('%Y%m%d')}&format=JSON"
+# ET₀ calculation using the FAO Penman-Monteith equation
+def calculate_et0(temp, wind_speed, humidity, solar_radiation, latitude):
+    T = (temp - 32) * 5/9  # Convert temperature to Celsius
+    u2 = wind_speed * 0.44704  # Convert wind speed from mph to m/s
+    e_s = 0.6108 * math.exp((17.27 * T) / (T + 237.3))  # Saturation vapor pressure in kPa
+    e_a = e_s * (humidity / 100)  # Actual vapor pressure
+    vpd = e_s - e_a  # Vapor pressure deficit
+    
+    # Constants
+    gamma = 0.665 * 0.001 * 101.3  # Psychrometric constant in kPa/°C
+    
+    # Extraterrestrial radiation (Ra)
+    J = datetime.datetime.now().timetuple().tm_yday  # Day of the year
+    lat_rad = math.radians(latitude)
+    dr = 1 + 0.033 * math.cos(2 * math.pi / 365 * J)
+    delta = 0.409 * math.sin(2 * math.pi / 365 * J - 1.39)
+    omega = math.acos(-math.tan(lat_rad) * math.tan(delta))
+    Ra = (24 * 60 / math.pi) * 0.0820 * dr * (omega * math.sin(lat_rad) * math.sin(delta) + math.cos(lat_rad) * math.cos(delta) * math.sin(omega))
+
+    # Net radiation (Rn)
+    Rns = (1 - 0.23) * solar_radiation  # Net shortwave radiation
+    Rnl = (4.903e-9 * ((T + 273.16)**4) * (0.34 - 0.14 * math.sqrt(e_a)) * ((1.35 * (solar_radiation / Ra)) - 0.35))  # Net longwave radiation
+    Rn = Rns - Rnl  # Net radiation in MJ/m^2/day
+
+    # Slope of the vapor pressure curve
+    delta_slope = (4098 * e_s) / ((T + 237.3) ** 2)
+
+    # FAO Penman-Monteith equation for ET₀
+    ET0 = ((0.408 * delta_slope * Rn) + (gamma * (900 / (T + 273)) * u2 * vpd)) / (delta_slope + gamma * (1 + 0.34 * u2))
+    
+    return ET0 * 0.0393701  # Convert from mm/day to inches/day
+
+# Function to calculate estimated soil moisture with OpenWeather historical data
+def calculate_soil_moisture_with_historical_data(initial_moisture, historical_data, latitude, decay_factor=0.995):
+    current_moisture = initial_moisture
+    for daily_data in historical_data:
+        precipitation = daily_data["precipitation"]
+        solar_radiation = daily_data["solar_radiation"]
         
-        response = requests.get(base_url)
-        if response.status_code == 200:
-            data = response.json()
-            solar_radiation = data['properties']['parameter']['ALLSKY_SFC_SW_DWN'][today.strftime('%Y%m%d')]
-            return solar_radiation
-        else:
-            return None
+        # Calculate ET₀ based on historical solar radiation
+        daily_et0 = calculate_et0(
+            temp=daily_data["temperature"],
+            wind_speed=daily_data["wind_speed"],
+            humidity=daily_data["humidity"],
+            solar_radiation=solar_radiation,
+            latitude=latitude
+        )
 
-    def calculate_et0(temp, wind_speed, humidity, solar_radiation, latitude):
-        T = (temp - 32) * 5/9  # Convert temperature to Celsius
-        u2 = wind_speed * 0.44704  # Convert wind speed from mph to m/s
-        e_s = 0.6108 * math.exp((17.27 * T) / (T + 237.3))  # Saturation vapor pressure in kPa
-        e_a = e_s * (humidity / 100)  # Actual vapor pressure
-        vpd = e_s - e_a  # Vapor pressure deficit
+        # Apply decay factor only to the added moisture
+        added_moisture = precipitation * decay_factor
+
+        # Adjust soil moisture
+        current_moisture = max(0, min((current_moisture + added_moisture - daily_et0), 100))
+    
+    return current_moisture
+
+# Button to fetch weather data, calculate soil moisture with historical data, and provide irrigation advice
+if st.sidebar.button("Get Irrigation Advice"):
+    weather_data = get_openweather_historical_data(town)  # Get town's coordinates here if required
+    if weather_data:
+        latitude, longitude = weather_data["latitude"], weather_data["longitude"]
+        historical_data = get_openweather_historical_data(latitude, longitude, planting_date.strftime('%Y%m%d'), current_date.strftime('%Y%m%d'))
         
-        # Constants
-        gamma = 0.665 * 0.001 * 101.3  # Psychrometric constant in kPa/°C
-        
-        # Extraterrestrial radiation (Ra)
-        J = datetime.datetime.now().timetuple().tm_yday  # Day of the year
-        lat_rad = math.radians(latitude)
-        dr = 1 + 0.033 * math.cos(2 * math.pi / 365 * J)
-        delta = 0.409 * math.sin(2 * math.pi / 365 * J - 1.39)
-        omega = math.acos(-math.tan(lat_rad) * math.tan(delta))
-        Ra = (24 * 60 / math.pi) * 0.0820 * dr * (omega * math.sin(lat_rad) * math.sin(delta) + math.cos(lat_rad) * math.cos(delta) * math.sin(omega))
-
-        # Net radiation (Rn)
-        Rns = (1 - 0.23) * solar_radiation  # Net shortwave radiation
-        Rnl = (4.903e-9 * ((T + 273.16)**4) * (0.34 - 0.14 * math.sqrt(e_a)) * ((1.35 * (solar_radiation / Ra)) - 0.35))  # Net longwave radiation
-        Rn = Rns - Rnl  # Net radiation in MJ/m^2/day
-
-        # Slope of the vapor pressure curve
-        delta_slope = (4098 * e_s) / ((T + 237.3) ** 2)
-
-        # FAO Penman-Monteith equation for ET₀
-        ET0 = ((0.408 * delta_slope * (Rn - 0)) + (gamma * (900 / (T + 273)) * u2 * vpd)) / (delta_slope + gamma * (1 + 0.34 * u2))
-        
-        return ET0 * 0.0393701  # Convert from mm/day to inches/day
-
-    # Calculate daily soil moisture and ET₀
-    def update_soil_moisture(weather_data, kc, initial_moisture, irrigation_events):
-        soil_moisture = initial_moisture
-        for date, irrigation_amount in irrigation_events.items():
-            solar_radiation = get_nasa_solar_radiation(weather_data["latitude"], weather_data["longitude"])
-            if solar_radiation:
-                et0_daily = calculate_et0(
-                    weather_data["temperature"],
-                    weather_data["wind_speed"],
-                    weather_data["humidity"],
-                    solar_radiation,
-                    weather_data["latitude"]
-                )
-                etc = et0_daily * kc
-                precipitation = weather_data["precipitation_inches"]
-                soil_moisture = soil_moisture - etc + precipitation + irrigation_amount
-                soil_moisture = min(max(soil_moisture, 0), 100)
-        return soil_moist
-        vpd = e_s - e_a  # Vapor pressure deficit
-
-        # Constants
-        gamma = 0.665 * 0.001 * 101.3  # Psychrometric constant in kPa/°C
-        
-        # Extraterrestrial radiation (Ra)
-        J = datetime.datetime.now().timetuple().tm_yday  # Day of the year
-        lat_rad = math.radians(latitude)
-        dr = 1 + 0.033 * math.cos(2 * math.pi / 365 * J)
-        delta = 0.409 * math.sin(2 * math.pi / 365 * J - 1.39)
-        omega = math.acos(-math.tan(lat_rad) * math.tan(delta))
-        Ra = (24 * 60 / math.pi) * 0.0820 * dr * (omega * math.sin(lat_rad) * math.sin(delta) + math.cos(lat_rad) * math.cos(delta) * math.sin(omega))
-
-        # Net radiation (Rn)
-        Rns = (1 - 0.23) * solar_radiation  # Net shortwave radiation
-        Rnl = (4.903e-9 * ((T + 273.16)**4) * (0.34 - 0.14 * math.sqrt(e_a)) * ((1.35 * (solar_radiation / Ra)) - 0.35))  # Net longwave radiation
-        Rn = Rns - Rnl  # Net radiation in MJ/m^2/day
-
-        # Slope of the vapor pressure curve
-        delta_slope = (4098 * e_s) / ((T + 237.3) ** 2)
-
-        # FAO Penman-Monteith equation for ET₀
-        ET0 = ((0.408 * delta_slope * (Rn - 0)) + (gamma * (900 / (T + 273)) * u2 * vpd)) / (delta_slope + gamma * (1 + 0.34 * u2))
-        
-        return ET0 * 0.0393701  # Convert from mm/day to inches/day
-
-    # Calculate daily soil moisture and ET₀
-    def update_soil_moisture(weather_data, kc, initial_moisture, irrigation_events):
-        soil_moisture = initial_moisture
-        for date, irrigation_amount in irrigation_events.items():
-            solar_radiation = get_nasa_solar_radiation(weather_data["latitude"], weather_data["longitude"])
-            if solar_radiation:
-                et0_daily = calculate_et0(
-                    weather_data["temperature"],
-                    weather_data["wind_speed"],
-                    weather_data["humidity"],
-                    solar_radiation,
-                    weather_data["latitude"]
-                )
-                etc = et0_daily * kc
-                precipitation = weather_data["precipitation_inches"]
-                soil_moisture = soil_moisture - etc + precipitation + irrigation_amount
-                soil_moisture = min(max(soil_moisture, 0), 100)
-        return soil_moisture
-
-    # Dashboard results and irrigation recommendation
-    with st.container():
-        st.subheader("📊 Dashboard Results")
-        
-        weather_data = get_weather_data_with_solar(town)
-        if weather_data:
-            initial_soil_moisture = 50
-            soil_moisture = update_soil_moisture(weather_data, kc_values[crop_type][crop_stage], initial_soil_moisture, irrigation_events)
+        if historical_data:
+            estimated_soil_moisture = calculate_soil_moisture_with_historical_data(initial_soil_moisture, historical_data, latitude)
             
-            st.write(f"Soil Moisture: {soil_moisture:.2f}%")
-            
-            if soil_moisture < 40:
-                st.write("🚨 **Irrigation Needed:** Apply 1.0 inches of water.")
-            elif 40 <= soil_moisture < 60:
-                st.write("⚠️ **Irrigation Suggested:** Apply 0.6 inches of water.")
+            # Irrigation advice
+            if estimated_soil_moisture < soil_moisture_targets["Corn"][crop_stage][0]:
+                advice = "High irrigation needed: Apply 1.0 inch of water."
+            elif estimated_soil_moisture > soil_moisture_targets["Corn"][crop_stage][1]:
+                advice = "Irrigation not required; soil moisture is sufficient."
             else:
-                st.write("✅ **Soil moisture is sufficient; no additional irrigation is needed.**")
-
+                advice = "Moderate irrigation recommended: Apply 0.5 inches of water."
+            
+            st.write(f"**Estimated Soil Moisture**: {estimated_soil_moisture:.2f}%")
+            st.write(f"**Irrigation Advice**: {advice}")
         else:
-            st.write("⚠️ Weather data unavailable for the specified location.")
+            st.write("⚠️ Could not retrieve historical weather data.")
+    else:
+        st.write("⚠️ Could not retrieve weather data for the specified location.")
 
-        # Handle cases where solar radiation data is unavailable
-        if weather_data and not get_nasa_solar_radiation(weather_data["latitude"], weather_data["longitude"]):
-            st.write("⚠️ Could not retrieve solar radiation data; ET₀ calculation was adjusted based on available weather data only.")
-
-# Clear cache button
-if st.sidebar.button('Clear Cache'):
-    st.cache_data.clear()
-
-st.markdown("---")
-st.write("ℹ️ **Note:** This model uses daily ET₀ calculations based on historical and current weather data, along with irrigation events to provide location-based recommendations for irrigation needs.")
